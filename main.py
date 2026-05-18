@@ -7,6 +7,7 @@ import uvicorn
 import requests
 import json
 import os
+import math
 
 
 # =========================================================
@@ -115,6 +116,8 @@ async def create_travel_plan(
                 "filter"  : place["placeFilterName"],
                 "hasImage": bool(place.get("imgUrl")),
                 "themes"  : place.get("placeThemeName", "").split(",") if place.get("placeThemeName") else [],
+                "lat"     : place.get("y", ""),
+                "lng"     : place.get("x", ""),
             }
             for place in place_list
         ]
@@ -172,10 +175,13 @@ async def create_travel_plan(
 규칙:
 1. 반드시 제공된 장소만 사용, 목록에 없는 id 절대 사용 금지
 2. 같은 장소 중복 금지
-3. 이동 동선을 고려해 근처 장소끼리 묶어서 배치
-4. 대표이미지(hasImage=true)인 장소 우선 배치
-5. 테마({', '.join(theme_list)}) 장소를 우선 선택
-6. filter가 '캠핑'인 장소는 숙소로 사용 금지
+3. 각 장소의 lat/lng 좌표를 반드시 참고하여 하루 일정 내 장소들이 서로 가까운 위치에 있도록 배치
+4. 하루 일정 내 장소 간 이동 거리를 최소화할 것 — 멀리 떨어진 장소를 같은 날에 배치하지 말 것
+5. 1박이상 여행은 날짜별로 지역을 나눠서 배치 — 같은 날은 같은 권역 내 장소로만 구성
+6. 대표이미지(hasImage=true)인 장소 우선 배치
+7. 테마({', '.join(theme_list)}) 장소를 우선 선택
+8. filter가 '캠핑'인 장소는 숙소로 사용 금지
+9. 카페는 반드시 점심 식사 장소와 가까운 위치의 카페를 선택할 것 — 점심 후 도보 또는 단거리 이동 가능한 카페 우선
 
 하루 필수 구성 (반드시 포함):
 {"- 식도락 장소 (themes 배열에 식도락 포함, filter가 한식/일식/양식/중식): 최소 " + str(required_food_theme) + "개 — 식사(아침/점심/저녁) 및 테마 슬롯 모두 식도락 장소로 채움" if "식도락" in theme_list else ""}
@@ -207,7 +213,7 @@ async def create_travel_plan(
             model="gpt-4o",
             input=prompt,
             max_output_tokens=3000,
-            temperature=0.3,
+            temperature=0.7,
             text={
                 "format": {
                     "type": "json_object"
@@ -306,6 +312,42 @@ async def create_travel_plan(
                 if cafe_supps:
                     groups["카페"].append(cafe_supps[0])
                     print(f"[카페 보충] placeId={cafe_supps[0]['placeId']}")
+                    
+            # 점심 장소 기준 가장 가까운 카페로 교체
+            lunch_plan = None
+            has_other_theme = len(groups["테마"]) > 0
+            if has_food_theme:
+                ft = groups["테마먹거리"]
+                if days == 1:
+                    lunch_idx = 0 if has_other_theme else 1  # 다른테마 있으면 [0], 단일이면 [1]
+                else:
+                    lunch_idx = 1 if has_other_theme else 2  # 단일 1박이상은 아침+테마1 다 식도락이라 [2]
+                lunch_plan = ft[lunch_idx] if len(ft) > lunch_idx else (ft[-1] if ft else None)
+            else:
+                fp = groups["먹거리"]
+                lunch_idx = 0 if days == 1 else 1  # 당일은 [0], 1박이상은 아침 다음 [1]
+                lunch_plan = fp[lunch_idx] if len(fp) > lunch_idx else (fp[-1] if fp else None)
+
+            if lunch_plan:
+                lunch_info = place_map.get(lunch_plan["placeId"], {})
+                lunch_lat  = float(lunch_info.get("y") or 0)
+                lunch_lng  = float(lunch_info.get("x") or 0)
+
+                if lunch_lat and lunch_lng:
+                    all_cafes = [
+                        p for p in place_list
+                        if p.get("placeFilterName") == "카페"
+                        and p["id"] not in current_used
+                    ]
+                    all_cafes.sort(key=lambda p: (
+                        (float(p.get("y") or 0) - lunch_lat) ** 2 +
+                        (float(p.get("x") or 0) - lunch_lng) ** 2
+                    ))
+                    if all_cafes:
+                        nearest = {"placeId": all_cafes[0]["id"]}
+                        if groups["카페"] and groups["카페"][0]["placeId"] != nearest["placeId"]:
+                            print(f"[카페 교체] {groups['카페'][0]['placeId']} -> {nearest['placeId']}")
+                        groups["카페"] = [nearest]
 
             # 볼거리 부족 시 공통 보충 (테마 3개 미만일 때만)
             if not groups["볼거리"] and not multi_theme:
@@ -489,6 +531,12 @@ async def create_travel_plan(
                     p for p in day["plans"]
                     if classify(place_map.get(p["placeId"], {}), theme_list) != "숙소"
                 ]
+                
+            if len(theme_list) >= 3:
+                day["plans"] = [
+                    p for p in day["plans"]
+                    if classify(place_map.get(p["placeId"], {}), theme_list) != "볼거리"
+                ]
 
         # -------------------------------------------------
         # 후처리 2: 이미지 없는 장소 교체 (재정렬 전에 수행)
@@ -523,6 +571,71 @@ async def create_travel_plan(
                         used_ids.add(replacement["id"])
                         plan["placeId"] = replacement["id"]
                         print(f"이미지 교체: {place_info['name']} -> {replacement['name']}")
+                        
+        # -------------------------------------------------
+        # 후처리 2.5: 하루 일정 내 동선 클러스터링
+        # 중심 좌표에서 너무 멀리 떨어진 장소를 같은 슬롯 타입 중 가까운 장소로 교체
+        # -------------------------------------------------
+        def haversine(lat1, lng1, lat2, lng2):
+            R = 6371  # 지구 반지름 km
+            dlat = math.radians(lat2 - lat1)
+            dlng = math.radians(lng2 - lng1)
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng/2)**2
+            return R * 2 * math.asin(math.sqrt(a))
+
+        MAX_DISTANCE_KM = 15  # 중심에서 최대 허용 거리
+
+        for day in result_json["schedule"]:
+            plans = day["plans"]
+            if not plans:
+                continue
+
+            # 중심 좌표 계산
+            coords = []
+            for p in plans:
+                info = place_map.get(p["placeId"], {})
+                lat = float(info.get("y") or 0)
+                lng = float(info.get("x") or 0)
+                if lat and lng:
+                    coords.append((lat, lng))
+
+            if not coords:
+                continue
+
+            center_lat = sum(c[0] for c in coords) / len(coords)
+            center_lng = sum(c[1] for c in coords) / len(coords)
+
+            # 중심에서 너무 멀리 떨어진 장소 교체
+            used_ids_day = {p["placeId"] for p in plans}
+            for p in plans:
+                info = place_map.get(p["placeId"], {})
+                lat  = float(info.get("y") or 0)
+                lng  = float(info.get("x") or 0)
+                if not lat or not lng:
+                    continue
+
+                dist = haversine(center_lat, center_lng, lat, lng)
+                if dist > MAX_DISTANCE_KM:
+                    # 같은 슬롯 타입 중 중심에 가까운 장소로 교체
+                    slot_type = classify(info, theme_list)
+                    candidates = [
+                        pl for pl in place_list
+                        if classify(pl, theme_list) == slot_type
+                        and pl["id"] not in used_ids_day
+                        and pl.get("imgUrl")
+                        and float(pl.get("y") or 0)
+                        and float(pl.get("x") or 0)
+                    ]
+                    candidates.sort(key=lambda pl: haversine(
+                        center_lat, center_lng,
+                        float(pl.get("y") or 0),
+                        float(pl.get("x") or 0)
+                    ))
+                    if candidates:
+                        print(f"[동선 교체] {info.get('name')} ({dist:.1f}km) -> {candidates[0]['name']}")
+                        used_ids_day.discard(p["placeId"])
+                        used_ids_day.add(candidates[0]["id"])
+                        p["placeId"] = candidates[0]["id"]
 
         # -------------------------------------------------
         # 후처리 3: 재정렬 적용 (이미지 교체 후)
