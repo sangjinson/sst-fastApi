@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from logging.handlers import RotatingFileHandler
 from ai.ai_client import request_travel_plan
 from api.data_client import fetch_place_list
 
 import uvicorn
 import json
 import math
+import logging
+import os
 
 
 # =========================================================
@@ -14,10 +17,55 @@ import math
 # =========================================================
 load_dotenv()
 
+
+# =========================================================
+# 로그 설정
+# =========================================================
+os.makedirs("logs", exist_ok=True)
+
+# 로그 포맷
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+# 파일 핸들러 - 10MB 초과 시 최대 5개까지 롤링
+file_handler = RotatingFileHandler(
+    "/home/sst/logs/fastapi.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8"
+)
+file_handler.setFormatter(formatter)
+
+# 콘솔 핸들러
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+
+# 앱 전용 로거
+logger = logging.getLogger("fastapi_app")
+logger.setLevel(logging.INFO)
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# uvicorn 접속 로그 - 기존 핸들러 제거 후 재등록으로 중복 방지
+for uvicorn_logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+    uvicorn_logger = logging.getLogger(uvicorn_logger_name)
+    uvicorn_logger.setLevel(logging.INFO)
+    uvicorn_logger.handlers.clear()       # 기존 핸들러 제거
+    uvicorn_logger.propagate = False      # 부모 로거로 전파 차단
+    uvicorn_logger.addHandler(file_handler)
+    uvicorn_logger.addHandler(console_handler)
+
+# 에러 로그 루트 레벨 캐치 - 중복 방지
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.WARNING)
+root_logger.handlers.clear()             # 기존 핸들러 제거
+root_logger.addHandler(file_handler)
+
+
 # =========================================================
 # FastAPI 생성
 # =========================================================
 app = FastAPI()
+
 
 # =========================================================
 # CORS 설정
@@ -29,6 +77,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # =========================================================
 # 여행 일정 생성 API
@@ -46,19 +95,23 @@ async def create_travel_plan(
         # -------------------------------------------------
         # themes 문자열 -> 리스트 변환
         # -------------------------------------------------
-        print("themes 수신값:", themes)
+        logger.info(f"themes 수신값: {themes}")
         theme_list = [t.strip() for t in themes.split(',') if t.strip()]
 
+        # -------------------------------------------------
         # Spring API에서 여행지 목록 조회
+        # -------------------------------------------------
         try:
             place_list = fetch_place_list(region, themes)
         except Exception as e:
+            logger.error(f"Spring API 호출 실패: {str(e)}", exc_info=True)
             return {"success": False, "message": str(e)}
 
         # -------------------------------------------------
         # 여행지 없을 경우
         # -------------------------------------------------
         if len(place_list) == 0:
+            logger.warning(f"조건에 맞는 여행지가 없습니다. region={region}, themes={themes}")
             return {
                 "success": False,
                 "message": "조건에 맞는 여행지가 없습니다."
@@ -178,21 +231,23 @@ async def create_travel_plan(
 }}
 """
 
+        # -------------------------------------------------
         # GPT-4o에 여행 일정 생성 요청
+        # -------------------------------------------------
         result_text = request_travel_plan(prompt)
 
-        print("========== GPT RESPONSE ==========")
-        print(result_text)
+        logger.info("========== GPT RESPONSE ==========")
+        logger.info(result_text)
 
         # -------------------------------------------------
         # JSON 문자열 -> 객체 변환
         # -------------------------------------------------
         result_json = json.loads(result_text)
-        
+
         # 이중 직렬화 대응
         if isinstance(result_json, str):
             result_json = json.loads(result_json)
-        
+
         # -------------------------------------------------
         # 유효하지 않은 placeId 제거
         # -------------------------------------------------
@@ -266,8 +321,8 @@ async def create_travel_plan(
                 ]
                 if cafe_supps:
                     groups["카페"].append(cafe_supps[0])
-                    print(f"[카페 보충] placeId={cafe_supps[0]['placeId']}")
-                    
+                    logger.info(f"[카페 보충] placeId={cafe_supps[0]['placeId']}")
+
             # 점심 장소 기준 가장 가까운 카페로 교체
             lunch_plan = None
             has_other_theme = len(groups["테마"]) > 0
@@ -301,7 +356,7 @@ async def create_travel_plan(
                     if all_cafes:
                         nearest = {"placeId": all_cafes[0]["id"]}
                         if groups["카페"] and groups["카페"][0]["placeId"] != nearest["placeId"]:
-                            print(f"[카페 교체] {groups['카페'][0]['placeId']} -> {nearest['placeId']}")
+                            logger.info(f"[카페 교체] {groups['카페'][0]['placeId']} -> {nearest['placeId']}")
                         groups["카페"] = [nearest]
 
             # 볼거리 부족 시 공통 보충 (테마 3개 미만일 때만)
@@ -315,7 +370,7 @@ async def create_travel_plan(
                 ]
                 if sight_supps:
                     groups["볼거리"].append(sight_supps[0])
-                    print(f"[볼거리 보충] placeId={sight_supps[0]['placeId']}")
+                    logger.info(f"[볼거리 보충] placeId={sight_supps[0]['placeId']}")
 
             if has_food_theme:
                 # 식도락 포함 시: 테마먹거리가 식사 슬롯도 담당
@@ -336,7 +391,7 @@ async def create_travel_plan(
                     ]
                     food_theme_pool += supplements[:needed_food_theme]
                     for s in supplements[:needed_food_theme]:
-                        print(f"[식도락 보충] placeId={s['placeId']}")
+                        logger.info(f"[식도락 보충] placeId={s['placeId']}")
 
                 # 다른 테마 장소 부족 시 보충
                 other_themes = [t for t in theme_list if t != "식도락"]
@@ -356,7 +411,7 @@ async def create_travel_plan(
                             ]
                             if ot_supps:
                                 other_theme_pool.append(ot_supps[0])
-                                print(f"[다른테마 보충] {ot} placeId={ot_supps[0]['placeId']}")
+                                logger.info(f"[다른테마 보충] {ot} placeId={ot_supps[0]['placeId']}")
             else:
                 # 식도락 미포함 시: 기존 방식
                 food_theme_pool  = []
@@ -439,7 +494,7 @@ async def create_travel_plan(
                     ]
                     food_pool += supplements[:needed]
                     for s in supplements[:needed]:
-                        print(f"[먹거리 보충] placeId={s['placeId']}")
+                        logger.info(f"[먹거리 보충] placeId={s['placeId']}")
 
                 if days == 1:
                     ordered += pop(theme_pool)        # 테마1
@@ -486,7 +541,7 @@ async def create_travel_plan(
                     p for p in day["plans"]
                     if classify(place_map.get(p["placeId"], {}), theme_list) != "숙소"
                 ]
-                
+
             if len(theme_list) >= 3:
                 day["plans"] = [
                     p for p in day["plans"]
@@ -515,8 +570,8 @@ async def create_travel_plan(
                 place_id   = plan["placeId"]
                 place_info = place_map.get(place_id)
                 if place_info and not place_info.get("imgUrl"):
-                    key        = (place_info["placeCategoryName"], place_info["placeFilterName"])
-                    candidates = image_places.get(key, [])
+                    key         = (place_info["placeCategoryName"], place_info["placeFilterName"])
+                    candidates  = image_places.get(key, [])
                     replacement = next(
                         (p for p in candidates if p["id"] not in used_ids),
                         None
@@ -525,8 +580,8 @@ async def create_travel_plan(
                         used_ids.discard(place_id)
                         used_ids.add(replacement["id"])
                         plan["placeId"] = replacement["id"]
-                        print(f"이미지 교체: {place_info['name']} -> {replacement['name']}")
-                        
+                        logger.info(f"[이미지 교체] {place_info['name']} -> {replacement['name']}")
+
         # -------------------------------------------------
         # 후처리 2.5: 하루 일정 내 동선 클러스터링
         # 중심 좌표에서 너무 멀리 떨어진 장소를 같은 슬롯 타입 중 가까운 장소로 교체
@@ -549,8 +604,8 @@ async def create_travel_plan(
             coords = []
             for p in plans:
                 info = place_map.get(p["placeId"], {})
-                lat = float(info.get("y") or 0)
-                lng = float(info.get("x") or 0)
+                lat  = float(info.get("y") or 0)
+                lng  = float(info.get("x") or 0)
                 if lat and lng:
                     coords.append((lat, lng))
 
@@ -572,7 +627,7 @@ async def create_travel_plan(
                 dist = haversine(center_lat, center_lng, lat, lng)
                 if dist > MAX_DISTANCE_KM:
                     # 같은 슬롯 타입 중 중심에 가까운 장소로 교체
-                    slot_type = classify(info, theme_list)
+                    slot_type  = classify(info, theme_list)
                     candidates = [
                         pl for pl in place_list
                         if classify(pl, theme_list) == slot_type
@@ -587,7 +642,7 @@ async def create_travel_plan(
                         float(pl.get("x") or 0)
                     ))
                     if candidates:
-                        print(f"[동선 교체] {info.get('name')} ({dist:.1f}km) -> {candidates[0]['name']}")
+                        logger.info(f"[동선 교체] {info.get('name')} ({dist:.1f}km) -> {candidates[0]['name']}")
                         used_ids_day.discard(p["placeId"])
                         used_ids_day.add(candidates[0]["id"])
                         p["placeId"] = candidates[0]["id"]
@@ -606,14 +661,14 @@ async def create_travel_plan(
             for plan in day["plans"]:
                 place_id = plan["placeId"]
                 if place_id in place_map:
-                    place_info         = place_map[place_id]
-                    plan["placeName"]  = place_info["name"]
-                    plan["category"]   = place_info.get("placeCategoryName", "")
-                    plan["overview"]   = place_info.get("overview", "")
-                    plan["imgUrl"]     = place_info.get("imgUrl", "")
-                    plan["lat"]        = place_info.get("y", "")
-                    plan["lng"]        = place_info.get("x", "")
-                    plan["addr"]       = place_info.get("addr", "")
+                    place_info        = place_map[place_id]
+                    plan["placeName"] = place_info["name"]
+                    plan["category"]  = place_info.get("placeCategoryName", "")
+                    plan["overview"]  = place_info.get("overview", "")
+                    plan["imgUrl"]    = place_info.get("imgUrl", "")
+                    plan["lat"]       = place_info.get("y", "")
+                    plan["lng"]       = place_info.get("x", "")
+                    plan["addr"]      = place_info.get("addr", "")
 
         # -------------------------------------------------
         # 응답 반환
@@ -624,12 +679,14 @@ async def create_travel_plan(
         }
 
     except json.JSONDecodeError as e:
+        logger.error(f"JSON 파싱 오류: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"JSON Parse Error: {str(e)}"
         }
 
     except Exception as e:
+        logger.error(f"일정 생성 중 오류 발생: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": str(e)
@@ -646,6 +703,7 @@ if __name__ == "__main__":
         port=8090,
         reload=True
     )
+
 
 # =========================================================
 # 끝
