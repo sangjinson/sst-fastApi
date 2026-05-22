@@ -58,6 +58,10 @@ for uvicorn_logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
     uvicorn_logger.addHandler(file_handler)
     uvicorn_logger.addHandler(console_handler)
 
+# uvicorn 기본 포맷터 덮어쓰기
+logging.getLogger("uvicorn").handlers = []
+logging.getLogger("uvicorn").addHandler(file_handler)
+
 # 에러 로그 루트 레벨 캐치 - 중복 방지
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.WARNING)
