@@ -1,6 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+
+# =========================================================
+# 환경변수 로드
+# =========================================================
+load_dotenv()
+
 from logging.handlers import TimedRotatingFileHandler
 from ai.ai_client import request_travel_plan
 from api.data_client import fetch_place_list
@@ -11,11 +17,6 @@ import math
 import logging
 import os
 
-
-# =========================================================
-# 환경변수 로드
-# =========================================================
-load_dotenv()
 
 
 # =========================================================
