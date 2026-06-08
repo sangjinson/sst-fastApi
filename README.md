@@ -1,6 +1,6 @@
 # 경기도 스마트 여행 플래너 — FastAPI AI Server
 
-> **팀명**: 식스센스 (SixSense) · GPT-4o 연동 AI 여행 일정 생성 서버
+> **팀명**: 식스센스 (SixSense) · GPT-4o 연동 AI 여행 일정 생성 서버  
 > **배포사이트**: https://sstour.cloud/
 
 Spring Boot 백엔드와 OpenAI GPT-4o 사이에서 동작하는 **FastAPI 중간 서버**입니다.
@@ -267,7 +267,7 @@ nohup uvicorn main:app --host 0.0.0.0 --port 8090 &
 OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 OPENAI_MODEL=gpt-4o
 OPENAI_MAX_TOKENS=2000
-OPENAI_TEMPERATURE=0.7
+OPENAI_TEMPERATURE=0.5
 
 # 서버 설정
 APP_HOST=0.0.0.0
