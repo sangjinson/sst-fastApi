@@ -325,4 +325,4 @@ public class FastApiClient {
 
 > **관련 레포지토리**
 > - [Frontend (React)](https://github.com/mojitt/sst-front)
-> - [FastAPI AI Server](https://github.com/mojitt/sst-fastApi)
+> - [Backend (Spring)](https://github.com/mojitt/sst-back)
